@@ -45,7 +45,7 @@ def initialize_game():
         Button.SELECT_WEAPON8,   # Index 17
         Button.RELOAD,           # Index 18
         Button.ZOOM,             # Index 19
-        Button.SPEED,            # Index 20,
+        Button.SPEED,            # Index 20
     ]
     for button in buttons:
         game.add_available_button(button)
@@ -194,9 +194,8 @@ class DoomResolver(BaseResolver):
     def __init__(self, game, domain):
         self.game = game
         self.domain = domain
-        self.frame_cache = {}
         self.frame_id = 0  # Unique frame identifier
-                        
+                            
     def resolve(self, request, handler):
         print("resolve method called", flush=True)
         try:
@@ -221,60 +220,53 @@ class DoomResolver(BaseResolver):
             print(f"Command Labels: {command_labels}", flush=True)
             print(f"Domain Labels: {domain_labels}", flush=True)
 
-            # Extract input_command, part_number, and frame_id
-            if len(command_labels) == 1:
+            # Extract input_command
+            if len(command_labels) >= 1:
                 input_command = command_labels[0]
-                part_number = 0
-                frame_id = self.frame_id
-            elif len(command_labels) == 3:
-                input_command = command_labels[0]
-                part_number = int(command_labels[1])
-                frame_id = int(command_labels[2])
             else:
                 input_command = 'idle'
-                part_number = 0
-                frame_id = self.frame_id
 
-            print(f"Input Command: {input_command}, Part Number: {part_number}, Frame ID: {frame_id}", flush=True)
+            print(f"Input Command: {input_command}", flush=True)
 
-            if part_number == 0:
-                # Generate new frame
-                self.game.make_action(map_input_to_action(input_command))
-                if self.game.is_episode_finished():
-                    self.game.new_episode()
-                state = self.game.get_state()
-                if state is not None:
-                    frame = state.screen_buffer
-                    # Convert frame to ASCII
-                    ascii_lines = frame_to_ascii(frame)
-                    ascii_data = '\n'.join(ascii_lines)
-                    # Compress the ASCII data
-                    compressed_data = zlib.compress(ascii_data.encode('utf-8'))
-                    encoded_data = base64.b64encode(compressed_data).decode('utf-8')
-                    # Split data into chunks of 255 characters
-                    chunks = [encoded_data[i:i+255] for i in range(0, len(encoded_data), 255)]
-                    self.frame_cache[self.frame_id] = chunks
-                    total_parts = len(chunks)
-                    # Send initial part with frame ID and total parts
-                    reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.TXT, rclass=1, ttl=0,
-                                        rdata=TXT(chunks[0])))
-                    reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.TXT, rclass=1, ttl=0,
-                                        rdata=TXT(f"FRAME_ID:{self.frame_id}")))
-                    reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.TXT, rclass=1, ttl=0,
-                                        rdata=TXT(f"TOTAL_PARTS:{total_parts}")))
-                    self.frame_id += 1
-                else:
-                    reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.TXT, rclass=1, ttl=0,
-                                        rdata=TXT("No frame available.")))
+            # Generate new frame
+            self.game.make_action(map_input_to_action(input_command))
+            if self.game.is_episode_finished():
+                self.game.new_episode()
+            state = self.game.get_state()
+            if state is not None:
+                frame = state.screen_buffer
+                # Convert frame to ASCII
+                ascii_lines = frame_to_ascii(frame)
+                ascii_data = '\n'.join(ascii_lines)
+                # Compress the ASCII data
+                compressed_data = zlib.compress(ascii_data.encode('utf-8'), level=1)  # Use level=1 for faster compression
+                encoded_data = base64.b64encode(compressed_data).decode('utf-8')
+                # Split the encoded data into chunks of up to 255 bytes
+                txt_chunks = [encoded_data[i:i+255] for i in range(0, len(encoded_data), 255)]
+                # Send the chunks in a single TXT record
+                reply.add_answer(RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.TXT,
+                    rclass=1,
+                    ttl=0,
+                    rdata=TXT(txt_chunks)
+                ))
+                reply.add_answer(RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.TXT,
+                    rclass=1,
+                    ttl=0,
+                    rdata=TXT(f"FRAME_ID:{self.frame_id}")
+                ))
+                self.frame_id += 1
             else:
-                # Send requested part
-                chunks = self.frame_cache.get(frame_id, [])
-                if 0 <= part_number - 1 < len(chunks):
-                    reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.TXT, rclass=1, ttl=0,
-                                        rdata=TXT(chunks[part_number - 1])))
-                else:
-                    reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.TXT, rclass=1, ttl=0,
-                                        rdata=TXT("Invalid part number.")))
+                reply.add_answer(RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.TXT,
+                    rclass=1,
+                    ttl=0,
+                    rdata=TXT("No frame available.")
+                ))
 
             # Ensure reply has a NOERROR response code
             reply.header.rcode = RCODE.NOERROR
