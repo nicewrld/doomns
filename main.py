@@ -51,7 +51,7 @@ def initialize_game():
         game.add_available_button(button)
     
     # Set screen format and resolution
-    game.set_screen_format(ScreenFormat.GRAY8)
+    game.set_screen_format(ScreenFormat.BGR24)
     game.set_screen_resolution(ScreenResolution.RES_640X480)  # Increased resolution
     
     # Start at the first level
@@ -100,91 +100,92 @@ def map_input_to_action(input_command):
         return [0] * 21  # Return no action if command is 'idle' or unrecognized
 
 # Improved frame to ASCII conversion
-def frame_to_ascii(frame, cols=160, rows=90):
-    # Convert frame to grayscale
-    if len(frame.shape) == 3:
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    else:
-        gray_frame = frame.copy()
-
-    # Resize the image
-    resized_frame = cv2.resize(gray_frame, (cols, rows), interpolation=cv2.INTER_AREA)
-
-    # Normalize the resized frame to [0,1]
-    normalized_frame = resized_frame / 255.0
-
-    # Apply Gaussian blurs with different sigmas
+def frame_to_ascii(frame, cols=140, rows=60):
+    # Resize the frame
+    resized_frame = cv2.resize(frame, (cols, rows), interpolation=cv2.INTER_AREA)
+    
+    # Ensure the frame has three channels (RGB)
+    if len(resized_frame.shape) == 2:
+        resized_frame = cv2.cvtColor(resized_frame, cv2.COLOR_GRAY2BGR)
+    
+    # Split the channels and normalize
+    b_channel, g_channel, r_channel = cv2.split(resized_frame)
+    b_channel = b_channel.astype(np.float32) / 255.0
+    g_channel = g_channel.astype(np.float32) / 255.0
+    r_channel = r_channel.astype(np.float32) / 255.0
+    
+    # Compute luminance
+    luminance = 0.2126 * r_channel + 0.7152 * g_channel + 0.0722 * b_channel
+    
+    # Advanced processing as before
     sigma1 = 1.0
-    sigma2 = sigma1 * 1.6  # Sigma scale from the shader
-    blur1 = cv2.GaussianBlur(normalized_frame, (0, 0), sigmaX=sigma1, sigmaY=sigma1)
-    blur2 = cv2.GaussianBlur(normalized_frame, (0, 0), sigmaX=sigma2, sigmaY=sigma2)
-
-    # Compute Difference of Gaussians (DoG)
-    tau = 0.98  # Detail level (adjustable)
+    sigma2 = sigma1 * 1.6
+    blur1 = cv2.GaussianBlur(luminance, (0, 0), sigmaX=sigma1, sigmaY=sigma1)
+    blur2 = cv2.GaussianBlur(luminance, (0, 0), sigmaX=sigma2, sigmaY=sigma2)
+    
+    tau = 0.98
     dog = blur1 - tau * blur2
-
-    # Threshold the DoG to detect edges
-    threshold = 0.005  # Edge threshold (adjustable)
+    
+    threshold = 0.005
     edge_map = (dog >= threshold).astype(np.float32)
-
-    # Apply Sobel operator to get edge gradients
+    
     sobelx = cv2.Sobel(edge_map, cv2.CV_64F, 1, 0, ksize=3)
     sobely = cv2.Sobel(edge_map, cv2.CV_64F, 0, 1, ksize=3)
     magnitude = np.hypot(sobelx, sobely)
-    angle = np.arctan2(sobely, sobelx)  # Angle in radians between -π and π
-
-    # Normalize angle to [0,1] for quantization
-    abs_theta = np.abs(angle) / np.pi  # Normalize absolute angle to [0,1]
-
-    # Quantize edge directions
+    angle = np.arctan2(sobely, sobelx)
+    
+    abs_theta = np.abs(angle) / np.pi
+    
     direction = np.full_like(angle, -1)
-    # Vertical edges
     condition1 = (abs_theta >= 0.0) & (abs_theta < 0.05)
     condition2 = (abs_theta > 0.95) & (abs_theta <= 1.0)
     direction[np.where(condition1 | condition2)] = 0
-    # Horizontal edges
     condition3 = (abs_theta > 0.45) & (abs_theta < 0.55)
     direction[np.where(condition3)] = 1
-    # Diagonal edges
     condition4 = (abs_theta > 0.05) & (abs_theta < 0.45)
     condition5 = (abs_theta > 0.55) & (abs_theta < 0.95)
     sign_theta = np.sign(angle)
-    direction[np.where(condition4 & (sign_theta > 0))] = 2  # Diagonal /
-    direction[np.where(condition4 & (sign_theta < 0))] = 3  # Diagonal \
-    direction[np.where(condition5 & (sign_theta > 0))] = 3  # Diagonal \
-    direction[np.where(condition5 & (sign_theta < 0))] = 2  # Diagonal /
-
-    # Edge ASCII characters based on direction
-    edge_ascii_chars = ['|', '-', '/', '\\']  # Adjust or expand as needed
-
-    # Luminance adjustment for fill ASCII
-    exposure = 1.0  # Adjust exposure
-    attenuation = 1.0  # Adjust attenuation
-    luminance = np.power(normalized_frame * exposure, attenuation)
-    luminance = np.clip(luminance, 0, 1)
-
-    # Luminance ASCII characters from darkest to lightest
-    luminance_ascii_chars = " .:-=+*#%@"  # Adjust or expand as needed
+    direction[np.where(condition4 & (sign_theta > 0))] = 2
+    direction[np.where(condition4 & (sign_theta < 0))] = 3
+    direction[np.where(condition5 & (sign_theta > 0))] = 3
+    direction[np.where(condition5 & (sign_theta < 0))] = 2
+    
+    edge_ascii_chars = ['|', '-', '/', '\\']
+    
+    exposure = 1.0
+    attenuation = 1.0
+    luminance_adj = np.power(luminance * exposure, attenuation)
+    luminance_adj = np.clip(luminance_adj, 0, 1)
+    
+    luminance_ascii_chars = " .:-=+*#%@"
     num_lum_chars = len(luminance_ascii_chars)
-
-    # Map luminance to ASCII characters
-    lum_indices = (luminance * (num_lum_chars - 1)).astype(int)
+    
+    lum_indices = (luminance_adj * (num_lum_chars - 1)).astype(int)
     lum_ascii = np.array([luminance_ascii_chars[idx] for idx in lum_indices.flatten()]).reshape(rows, cols)
-
-    # Create the final ASCII image
+    
+    # Function to convert RGB to ANSI escape code
+    def rgb_to_ansi(r, g, b):
+        return f"\033[38;2;{int(r)};{int(g)};{int(b)}m"
+    
+    # Build the ASCII image with color
     ascii_image = []
     for i in range(rows):
         ascii_row = ""
         for j in range(cols):
+            r = r_channel[i, j] * 255
+            g = g_channel[i, j] * 255
+            b = b_channel[i, j] * 255
+            color_code = rgb_to_ansi(r, g, b)
             if edge_map[i, j] > 0:
                 dir_value = direction[i, j]
                 if dir_value >= 0 and dir_value <= 3:
                     ascii_char = edge_ascii_chars[int(dir_value)]
                 else:
-                    ascii_char = ' '  # Fallback for invalid directions
+                    ascii_char = ' '
             else:
                 ascii_char = lum_ascii[i, j]
-            ascii_row += ascii_char
+            ascii_row += f"{color_code}{ascii_char}"
+        ascii_row += "\033[0m"  # Reset color at end of line
         ascii_image.append(ascii_row)
     return ascii_image
 
@@ -239,7 +240,7 @@ class DoomResolver(BaseResolver):
                 ascii_lines = frame_to_ascii(frame)
                 ascii_data = '\n'.join(ascii_lines)
                 # Compress the ASCII data
-                compressed_data = zlib.compress(ascii_data.encode('utf-8'), level=1)  # Use level=1 for faster compression
+                compressed_data = zlib.compress(ascii_data.encode('utf-8'), level=1) # Use level=1 for faster compression
                 encoded_data = base64.b64encode(compressed_data).decode('utf-8')
                 # Split the encoded data into chunks of up to 255 bytes
                 txt_chunks = [encoded_data[i:i+255] for i in range(0, len(encoded_data), 255)]

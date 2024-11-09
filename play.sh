@@ -4,7 +4,7 @@
 SERVER_IP="127.0.0.1"                  # Replace with your DNS server IP
 SERVER_PORT="9353"                     # Port where your DNS server is running
 DOMAIN="dnsroleplay.club"              # Your domain
-SLEEP_TIME="0.01"                      # Time between frames in seconds (adjust as needed)
+SLEEP_TIME="0"                      # Time between frames in seconds (adjust as needed)
 
 # Initialize variables
 command="idle"                         # Default command when no input is detected
