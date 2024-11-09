@@ -4,6 +4,7 @@
 SERVER_IP="127.0.0.1"                  # Replace with your DNS server IP
 SERVER_PORT="9353"                     # Port where your DNS server is running
 DOMAIN="dnsroleplay.club"              # Your domain
+SLEEP_TIME="0.02"                       # Time between frames (adjust as needed)
 
 # Initialize variables
 command="idle"                         # Default command when no input is detected
@@ -11,22 +12,16 @@ command="idle"                         # Default command when no input is detect
 # Hide the cursor for a better visual experience
 tput civis
 
-# Save current terminal settings
-OLD_STTY_SETTINGS=$(stty -g)
-# Configure terminal for non-blocking input
-stty -echo -icanon time 0 min 0
-
-# Function to restore cursor visibility and terminal settings on exit
+# Function to restore cursor visibility on exit
 function on_exit {
     tput cnorm
-    stty "$OLD_STTY_SETTINGS"
 }
 trap on_exit EXIT
 
-while true; do
-    # Read user input without blocking
-    input=$(dd bs=1 count=1 2>/dev/null)
-    if [ -n "$input" ]; then
+# Function to read user input without blocking
+read_input() {
+    # Use 'read' with a timeout of 0 for non-blocking behavior
+    if read -rsn1 -t 1 input; then
         # Update command based on input
         case "$input" in
             w)      command="w" ;;
@@ -47,12 +42,54 @@ while true; do
         # No input detected; set to 'idle'
         command="idle"
     fi
+}
 
-    # Send the DNS query using dig and capture the output
-    output=$(dig +short +bufsize=4096 -p $SERVER_PORT TXT $command.$DOMAIN @$SERVER_IP)
+while true; do
+    # Read user input without blocking
+    read_input
 
-    # Extract the TXT records and combine them
-    ascii_art=$(echo "$output" | sed 's/^"//;s/"$//' | tr -d '\r')
+    # Initialize frame assembly variables
+    ascii_data=""
+    part=0
+    total_parts=1
+    frame_id=0
+
+    while [ $part -lt $total_parts ]; do
+    if [ $part -eq 0 ]; then
+        qname="$command.$DOMAIN"
+    else
+        qname="$command.$((part)).$frame_id.$DOMAIN"
+    fi
+
+    # Adjust 'part' to start from 1 for the server
+    adjusted_part=$((part + 1))
+
+    if [ $part -eq 0 ]; then
+        qname="$command.$DOMAIN"
+    else
+        qname="$command.$adjusted_part.$frame_id.$DOMAIN"
+    fi
+
+    # Rest of the code remains the same...
+
+        output=$(dig +tcp +short +bufsize=65535 -p $SERVER_PORT TXT $qname @$SERVER_IP)
+
+        while IFS= read -r line; do
+            line=$(echo "$line" | sed 's/^"//;s/"$//')
+            if [[ "$line" == FRAME_ID:* ]]; then
+                frame_id=${line#FRAME_ID:}
+            elif [[ "$line" == TOTAL_PARTS:* ]]; then
+                total_parts=${line#TOTAL_PARTS:}
+            else
+                ascii_data+="$line"
+            fi
+        done <<< "$output"
+
+        part=$((part + 1))
+    done
+
+    # Decode and decompress the ASCII data
+    ascii_art=$(echo "$ascii_data" | base64 --decode | python3 -c "import sys, zlib; print(zlib.decompress(sys.stdin.buffer.read()).decode('utf-8'))")
 
     # Clear the terminal
     clear
@@ -61,4 +98,5 @@ while true; do
     echo -e "$ascii_art"
 
     # Sleep for a short time before the next iteration
+    sleep $SLEEP_TIME
 done

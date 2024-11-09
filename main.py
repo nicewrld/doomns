@@ -1,9 +1,11 @@
 import os
-from PIL import Image
 import numpy as np
 from dnslib.server import DNSServer, BaseResolver, DNSLogger
-from dnslib import RR, TXT, QTYPE
+from dnslib import RR, TXT, QTYPE, RCODE
 import time
+import zlib
+import base64
+import traceback
 
 # Import ViZDoom
 from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution, Button
@@ -17,9 +19,6 @@ def initialize_game():
     
     # Set the path to your original Doom WAD file
     game.set_doom_game_path("DOOM.WAD")  # Replace with the actual path
-    
-    # Do not load any specific scenario configuration
-    # game.load_config("scenarios/basic.cfg")  # Commented out
     
     game.set_window_visible(True)  # Set to True to display the game window
     game.set_mode(Mode.PLAYER)
@@ -101,10 +100,7 @@ def map_input_to_action(input_command):
         return [0] * 21  # Return no action if command is 'idle' or unrecognized
 
 # Improved frame to ASCII conversion
-def frame_to_ascii(frame, cols=80, rows=43):
-    import cv2
-    import numpy as np
-
+def frame_to_ascii(frame, cols=160, rows=90):
     # Convert frame to grayscale
     if len(frame.shape) == 3:
         gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -193,50 +189,113 @@ def frame_to_ascii(frame, cols=80, rows=43):
     return ascii_image
 
 # DNS Resolver Class
+
 class DoomResolver(BaseResolver):
-    def __init__(self, game):
+    def __init__(self, game, domain):
         self.game = game
-            
+        self.domain = domain
+        self.frame_cache = {}
+        self.frame_id = 0  # Unique frame identifier
+                        
     def resolve(self, request, handler):
-        reply = request.reply()
-        qname = request.q.qname
-        input_command = str(qname).split('.')[0]
-        # Map input command to action
-        action = map_input_to_action(input_command)
-        # Make the action in the game
-        self.game.make_action(action)
-        # Check if the game is over
-        if self.game.is_episode_finished():
-            self.game.new_episode()
-        # Get the current frame
-        state = self.game.get_state()
-        if state is not None:
-            frame = state.screen_buffer
-            # Convert frame to ASCII
-            ascii_lines = frame_to_ascii(frame)
-            # Limit the number of lines to avoid exceeding DNS message size
-            max_lines = 50  # Adjust as needed
-            ascii_lines = ascii_lines[:max_lines]
-            # Send each line as a separate TXT record
-            for line in ascii_lines:
-                # Truncate line to 200 characters
-                line = line[:200]
-                reply.add_answer(RR(rname=qname, rtype=QTYPE.TXT, rclass=1,
-                                    ttl=0, rdata=TXT(line)))
-        else:
-            reply.add_answer(RR(rname=qname, rtype=QTYPE.TXT, rclass=1,
-                                ttl=0, rdata=TXT("No frame available.")))
-        return reply
+        print("resolve method called", flush=True)
+        try:
+            reply = request.reply()
+            qname = request.q.qname
+            labels = qname.label  # Use the 'label' attribute
+            labels = [label.decode('utf-8') for label in labels]
+
+            # Adjust for trailing empty label if present
+            if labels and labels[-1] == '':
+                labels = labels[:-1]
+            domain_labels = self.domain.split('.')
+            if domain_labels and domain_labels[-1] == '':
+                domain_labels = domain_labels[:-1]
+
+            if len(labels) > len(domain_labels):
+                command_labels = labels[:-(len(domain_labels))]
+            else:
+                command_labels = labels
+
+            print(f"Labels: {labels}", flush=True)
+            print(f"Command Labels: {command_labels}", flush=True)
+            print(f"Domain Labels: {domain_labels}", flush=True)
+
+            # Extract input_command, part_number, and frame_id
+            if len(command_labels) == 1:
+                input_command = command_labels[0]
+                part_number = 0
+                frame_id = self.frame_id
+            elif len(command_labels) == 3:
+                input_command = command_labels[0]
+                part_number = int(command_labels[1])
+                frame_id = int(command_labels[2])
+            else:
+                input_command = 'idle'
+                part_number = 0
+                frame_id = self.frame_id
+
+            print(f"Input Command: {input_command}, Part Number: {part_number}, Frame ID: {frame_id}", flush=True)
+
+            if part_number == 0:
+                # Generate new frame
+                self.game.make_action(map_input_to_action(input_command))
+                if self.game.is_episode_finished():
+                    self.game.new_episode()
+                state = self.game.get_state()
+                if state is not None:
+                    frame = state.screen_buffer
+                    # Convert frame to ASCII
+                    ascii_lines = frame_to_ascii(frame)
+                    ascii_data = '\n'.join(ascii_lines)
+                    # Compress the ASCII data
+                    compressed_data = zlib.compress(ascii_data.encode('utf-8'))
+                    encoded_data = base64.b64encode(compressed_data).decode('utf-8')
+                    # Split data into chunks of 255 characters
+                    chunks = [encoded_data[i:i+255] for i in range(0, len(encoded_data), 255)]
+                    self.frame_cache[self.frame_id] = chunks
+                    total_parts = len(chunks)
+                    # Send initial part with frame ID and total parts
+                    reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.TXT, rclass=1, ttl=0,
+                                        rdata=TXT(chunks[0])))
+                    reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.TXT, rclass=1, ttl=0,
+                                        rdata=TXT(f"FRAME_ID:{self.frame_id}")))
+                    reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.TXT, rclass=1, ttl=0,
+                                        rdata=TXT(f"TOTAL_PARTS:{total_parts}")))
+                    self.frame_id += 1
+                else:
+                    reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.TXT, rclass=1, ttl=0,
+                                        rdata=TXT("No frame available.")))
+            else:
+                # Send requested part
+                chunks = self.frame_cache.get(frame_id, [])
+                if 0 <= part_number - 1 < len(chunks):
+                    reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.TXT, rclass=1, ttl=0,
+                                        rdata=TXT(chunks[part_number - 1])))
+                else:
+                    reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.TXT, rclass=1, ttl=0,
+                                        rdata=TXT("Invalid part number.")))
+
+            # Ensure reply has a NOERROR response code
+            reply.header.rcode = RCODE.NOERROR
+            return reply
+        except Exception as e:
+            print(f"Exception in resolve method: {e}", flush=True)
+            traceback.print_exc()
+            # Return an empty reply with SERVFAIL to prevent NoneType error
+            reply = request.reply()
+            reply.header.rcode = RCODE.SERVFAIL
+            return reply
 
 if __name__ == "__main__":
     # Initialize Doom game
     game = initialize_game()
-    
-    # Start DNS server
-    resolver = DoomResolver(game)
+    domain = "dnsroleplay.club"  # Replace with your domain
+    # Start DNS server with TCP support
+    resolver = DoomResolver(game, domain)
     logger = DNSLogger(prefix=False)
-    server = DNSServer(resolver, port=9353, address="0.0.0.0", logger=logger)
-    print("Starting DNS server on port 9353...")
+    server = DNSServer(resolver, port=9353, address="0.0.0.0", logger=logger, tcp=True)
+    print("Starting DNS server on port 9353 (TCP and UDP)...")
     server.start_thread()
 
     # Keep the main thread alive
