@@ -14,9 +14,8 @@ from vizdoom import DoomGame, Mode, ScreenFormat, ScreenResolution, Button
 # Import OpenCV
 import cv2
 
-import time
 import functools
-
+import threading
 
 def timing_decorator(func):
     @functools.wraps(func)
@@ -29,7 +28,6 @@ def timing_decorator(func):
         return result
 
     return wrapper
-
 
 # Initialize DoomGame
 def initialize_game():
@@ -79,7 +77,6 @@ def initialize_game():
     game.init()
     return game
 
-
 # Map input commands to Doom actions
 @timing_decorator
 def map_input_to_action(input_command):
@@ -118,7 +115,6 @@ def map_input_to_action(input_command):
         return action
     else:
         return [0] * 21  # Return no action if command is 'idle' or unrecognized
-
 
 # Improved frame to ASCII conversion
 @timing_decorator
@@ -186,12 +182,17 @@ def frame_to_ascii(frame, cols=140, rows=60):
     r_vals = (r_channel * 255).astype(np.uint8)
     g_vals = (g_channel * 255).astype(np.uint8)
     b_vals = (b_channel * 255).astype(np.uint8)
+    # Vectorize string conversion
+    vectorized_str = np.vectorize(str)
+    r_str = vectorized_str(r_vals)
+    g_str = vectorized_str(g_vals)
+    b_str = vectorized_str(b_vals)
     color_codes = np.char.add(
         np.char.add(
-            np.char.add("\033[38;2;", r_vals.astype(str)),
-            np.char.add(";", g_vals.astype(str)),
+            np.char.add("\033[38;2;", r_str),
+            np.char.add(";", g_str),
         ),
-        np.char.add(";", np.char.add(b_vals.astype(str), "m")),
+        np.char.add(";", np.char.add(b_str, "m")),
     )
 
     # Build the ASCII image without loops
@@ -203,15 +204,14 @@ def frame_to_ascii(frame, cols=140, rows=60):
 
     return ascii_image
 
-
 # DNS Resolver Class
 
-
 class DoomResolver(BaseResolver):
-    def __init__(self, game, domain):
+    def __init__(self, game, domain, lock):
         self.game = game
         self.domain = domain
         self.frame_id = 0  # Unique frame identifier
+        self.lock = lock  # Threading lock for synchronization
 
     @timing_decorator
     def resolve(self, request, handler):
@@ -246,11 +246,14 @@ class DoomResolver(BaseResolver):
 
             print(f"Input Command: {input_command}", flush=True)
 
-            # Generate new frame
-            self.game.make_action(map_input_to_action(input_command))
-            if self.game.is_episode_finished():
-                self.game.new_episode()
-            state = self.game.get_state()
+            # Generate new frame with synchronization
+            with self.lock:
+                action = map_input_to_action(input_command)
+                self.game.make_action(action)
+                if self.game.is_episode_finished():
+                    self.game.new_episode()
+                state = self.game.get_state()
+
             if state is not None:
                 frame = state.screen_buffer
                 # Convert frame to ASCII
@@ -307,16 +310,51 @@ class DoomResolver(BaseResolver):
             reply.header.rcode = RCODE.SERVFAIL
             return reply
 
+def background_game_loop(game, lock, stop_event, tick_interval=0.05):
+    """
+    Continuously make idle actions to keep the game progressing.
+    :param game: The DoomGame instance.
+    :param lock: Threading lock for synchronization.
+    :param stop_event: Event to signal thread termination.
+    :param tick_interval: Time between ticks in seconds.
+    """
+    idle_action = [0] * 21  # Assuming 'idle' is no buttons pressed
+    while not stop_event.is_set():
+        with lock:
+            try:
+                game.make_action(idle_action, 1)  # 1 timestep per action
+                if game.is_episode_finished():
+                    game.new_episode()
+            except Exception as e:
+                print(f"Exception in background_game_loop: {e}", flush=True)
+                traceback.print_exc()
+        time.sleep(tick_interval)  # Control the tick rate
 
 if __name__ == "__main__":
     # Initialize Doom game
     game = initialize_game()
     domain = "dnsroleplay.club"  # Replace with your domain
+
+    # Create a threading lock for synchronization
+    game_lock = threading.Lock()
+
+    # Initialize stop event for background thread
+    stop_event = threading.Event()
+
+    # Start the background thread
+    bg_thread = threading.Thread(
+        target=background_game_loop, args=(game, game_lock, stop_event), daemon=True
+    )
+    bg_thread.start()
+    print("Background game loop started.", flush=True)
+
     # Start DNS server with TCP support
-    resolver = DoomResolver(game, domain)
+    resolver = DoomResolver(game, domain, game_lock)
     logger = DNSLogger(prefix=False)
-    server = DNSServer(resolver, port=9353, address="0.0.0.0", logger=logger, tcp=True)
-    print("Starting DNS server on port 9353 (TCP and UDP)...")
+    server = DNSServer(
+        resolver, port=9353, address="0.0.0.0", logger=logger, tcp=True
+    )
+    print("Starting DNS server on port 9353 (TCP and UDP)...", flush=True)
     server.start_thread()
 
     # Keep the main thread alive
@@ -324,6 +362,10 @@ if __name__ == "__main__":
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        pass
+        print("Shutting down...", flush=True)
     finally:
+        # Signal the background thread to stop
+        stop_event.set()
+        bg_thread.join(timeout=2)
         game.close()
+        print("Game closed and background thread terminated.", flush=True)

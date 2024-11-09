@@ -4,16 +4,19 @@
 SERVER_IP="127.0.0.1"                  # Replace with your DNS server IP
 SERVER_PORT="9353"                     # Port where your DNS server is running
 DOMAIN="dnsroleplay.club"              # Your domain
-SLEEP_TIME="0"                      # Time between frames in seconds (adjust as needed)
+SLEEP_TIME="0.01"                      # Time between frames in seconds (adjust as needed)
 
 # Initialize variables
 command="idle"                         # Default command when no input is detected
+ascii_art=""                           # Initialize ascii_art
 
-# Hide the cursor for a better visual experience
+# Hide the cursor for a better visual experience and switch to alternate screen buffer
 tput civis
+tput smcup
 
 # Function to restore cursor visibility and terminal settings on exit
 function on_exit {
+    tput rmcup
     tput cnorm
     stty "$STTY_ORIG"
 }
@@ -80,17 +83,19 @@ while true; do
     done <<< "$output"
 
     # Decode and decompress the ASCII data
-    ascii_art=$(echo "$ascii_data" | base64 -D 2>/dev/null | python3 -c "import sys, zlib; print(zlib.decompress(sys.stdin.buffer.read()).decode('utf-8'))" 2>/dev/null)
+    ascii_art_new=$(echo "$ascii_data" | base64 -D 2>/dev/null | python3 -c "import sys, zlib; print(zlib.decompress(sys.stdin.buffer.read()).decode('utf-8'))" 2>/dev/null)
 
-    # Check if ascii_art is empty or not
-    if [ -z "$ascii_art" ]; then
-        echo "Failed to retrieve frame."
-    else
-        # Clear the terminal
-        clear
+    # Check if ascii_art_new is not empty
+    if [ -n "$ascii_art_new" ]; then
+        ascii_art="$ascii_art_new"
+    fi
 
-        # Display the ASCII art
+    # Clear the terminal and display the ASCII art
+    clear
+    if [ -n "$ascii_art" ]; then
         echo -e "$ascii_art"
+    else
+        echo "Failed to retrieve frame."
     fi
 
     # Sleep for a short time before the next iteration
